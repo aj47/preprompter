@@ -1,0 +1,40 @@
+# Preprompter - macOS Screen Capture Daemon Configuration
+
+[capture]
+# Monitor ID to capture (0 = primary monitor)
+monitor_id = 0
+# Capture interval in seconds
+interval_seconds = 3
+# JPEG quality (1-100)
+jpeg_quality = 80
+
+[idle]
+# Idle threshold in seconds - capture pauses when user is idle for this long
+threshold_seconds = 60
+# How often to check for idle state (milliseconds)
+check_interval_ms = 500
+
+[s3]
+# S3 bucket name
+bucket = "my-screen-captures"
+# AWS region
+region = "us-east-1"
+# Custom endpoint URL (for Cloudflare R2, MinIO, etc.)
+# endpoint_url = "https://your-account.r2.cloudflarestorage.com"
+# Key prefix for uploaded frames (optional)
+# prefix = "captures"
+
+[upload]
+# Upload mode: "immediate" or "batch"
+mode = "immediate"
+# Batch size for batch mode
+batch_size = 10
+# Number of retry attempts for failed uploads
+retry_attempts = 3
+
+[logging]
+# Data directory for logs and local staging
+data_dir = "~/.preprompter"
+# Log level (trace, debug, info, warn, error)
+level = "info"
+
