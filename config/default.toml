@@ -16,7 +16,7 @@ check_interval_ms = 500
 
 [s3]
 # S3 bucket name
-bucket = "my-screen-captures"
+bucket = "screen-recordings-aj"
 # AWS region
 region = "us-east-1"
 # Custom endpoint URL (for Cloudflare R2, MinIO, etc.)

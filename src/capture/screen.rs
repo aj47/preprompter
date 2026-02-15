@@ -8,9 +8,8 @@ use screencapturekit::cv::CVPixelBufferLockFlags;
 use screencapturekit::prelude::*;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::mpsc;
 
 /// Information about a display/monitor.
 #[derive(Debug, Clone)]
@@ -78,94 +77,132 @@ impl ScreenCapture {
     pub async fn capture(&self) -> Result<CapturedFrame> {
         let start = Instant::now();
         let timestamp = Utc::now();
-
-        // Get shareable content
-        let content = SCShareableContent::get()
-            .map_err(|e| anyhow::anyhow!("Failed to get shareable content: {:?}", e))?;
-
-        let displays = content.displays();
-        if displays.is_empty() {
-            anyhow::bail!("No displays available for capture");
-        }
-
-        // Find the requested monitor
-        let display = displays
-            .iter()
-            .find(|d| d.display_id() == self.monitor_id)
-            .or_else(|| displays.first())
-            .ok_or_else(|| anyhow::anyhow!("Monitor {} not found", self.monitor_id))?;
-
-        let display_id = display.display_id();
-        let width = display.width() as u32;
-        let height = display.height() as u32;
-
-        // Create content filter and configuration
-        let filter = SCContentFilter::create()
-            .with_display(display)
-            .with_excluding_windows(&[])
-            .build();
-
-        let config = SCStreamConfiguration::new()
-            .with_width(width)
-            .with_height(height);
-
-        // Create stream and capture a single frame using async API
-        let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(1);
-        let captured = Arc::new(AtomicBool::new(false));
-        let captured_clone = captured.clone();
         let quality = self.jpeg_quality;
+        let monitor_id = self.monitor_id;
 
-        // Create the stream with output handler
-        let mut stream = SCStream::new(&filter, &config);
-        
-        stream.add_output_handler(
-            move |sample: CMSampleBuffer, output_type: SCStreamOutputType| {
-                if output_type != SCStreamOutputType::Screen {
-                    return;
-                }
-                
-                // Only capture one frame
-                if captured_clone.swap(true, Ordering::SeqCst) {
-                    return;
-                }
-
-                // Try to extract pixel buffer and encode to JPEG
-                if let Some(pixel_buffer) = sample.image_buffer() {
-                    if let Some(jpeg_data) = encode_pixel_buffer_to_jpeg(&pixel_buffer, quality) {
-                        let _ = frame_tx.try_send(jpeg_data);
-                    }
-                }
-            },
-            SCStreamOutputType::Screen,
-        );
-
-        // Start capture
-        stream.start_capture()
-            .map_err(|e| anyhow::anyhow!("Failed to start capture: {:?}", e))?;
-
-        // Wait for frame with timeout
-        let frame_data = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            frame_rx.recv()
-        )
+        // Run the blocking capture in a separate thread
+        let result = tokio::task::spawn_blocking(move || {
+            capture_frame_blocking(monitor_id, quality)
+        })
         .await
-        .context("Timeout waiting for frame")?
-        .context("Failed to receive frame")?;
-
-        // Stop capture
-        let _ = stream.stop_capture();
+        .context("Capture task panicked")?
+        .context("Capture failed")?;
 
         let capture_duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(CapturedFrame {
-            data: frame_data,
-            width,
-            height,
+            data: result.0,
+            width: result.1,
+            height: result.2,
             timestamp,
-            monitor_id: display_id,
+            monitor_id: result.3,
             capture_duration_ms,
         })
     }
+}
+
+/// Frame handler that stores captured frame data
+struct FrameHandler {
+    frame_data: Arc<Mutex<Option<Vec<u8>>>>,
+    captured: Arc<AtomicBool>,
+    quality: u8,
+}
+
+impl SCStreamOutputTrait for FrameHandler {
+    fn did_output_sample_buffer(&self, sample: CMSampleBuffer, output_type: SCStreamOutputType) {
+        if output_type != SCStreamOutputType::Screen {
+            return;
+        }
+
+        // Only capture one frame
+        if self.captured.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        // Try to extract pixel buffer and encode to JPEG
+        if let Some(pixel_buffer) = sample.image_buffer() {
+            if let Some(jpeg_data) = encode_pixel_buffer_to_jpeg(&pixel_buffer, self.quality) {
+                if let Ok(mut guard) = self.frame_data.lock() {
+                    *guard = Some(jpeg_data);
+                }
+            }
+        }
+    }
+}
+
+/// Blocking capture implementation
+fn capture_frame_blocking(monitor_id: u32, quality: u8) -> Result<(Vec<u8>, u32, u32, u32)> {
+    // Get shareable content
+    let content = SCShareableContent::get()
+        .map_err(|e| anyhow::anyhow!("Failed to get shareable content: {:?}", e))?;
+
+    let displays = content.displays();
+    if displays.is_empty() {
+        anyhow::bail!("No displays available for capture");
+    }
+
+    // Find the requested monitor
+    let display = displays
+        .iter()
+        .find(|d| d.display_id() == monitor_id)
+        .or_else(|| displays.first())
+        .ok_or_else(|| anyhow::anyhow!("Monitor {} not found", monitor_id))?;
+
+    let display_id = display.display_id();
+    let width = display.width() as u32;
+    let height = display.height() as u32;
+
+    // Create content filter and configuration
+    let filter = SCContentFilter::create()
+        .with_display(display)
+        .with_excluding_windows(&[])
+        .build();
+
+    let config = SCStreamConfiguration::new()
+        .with_width(width)
+        .with_height(height)
+        .with_pixel_format(PixelFormat::BGRA);
+
+    // Create shared state for frame capture
+    let frame_data: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+    let captured = Arc::new(AtomicBool::new(false));
+
+    let handler = FrameHandler {
+        frame_data: frame_data.clone(),
+        captured: captured.clone(),
+        quality,
+    };
+
+    // Create and start stream
+    let mut stream = SCStream::new(&filter, &config);
+    stream.add_output_handler(handler, SCStreamOutputType::Screen);
+
+    stream
+        .start_capture()
+        .map_err(|e| anyhow::anyhow!("Failed to start capture: {:?}", e))?;
+
+    // Wait for frame with polling
+    let timeout = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+
+    while start.elapsed() < timeout {
+        if captured.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Stop capture
+    let _ = stream.stop_capture();
+
+    // Get the captured frame
+    let data = frame_data
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Lock poisoned"))?
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("No frame captured - check Screen Recording permission"))?;
+
+    Ok((data, width, height, display_id))
 }
 
 /// Encode a pixel buffer to JPEG format.
