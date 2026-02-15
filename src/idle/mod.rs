@@ -4,6 +4,8 @@
 mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use chrono::{DateTime, Utc};
 
@@ -20,3 +22,5 @@ pub enum ActivityState {
 pub use macos::IdleDetector;
 #[cfg(target_os = "linux")]
 pub use linux::IdleDetector;
+#[cfg(target_os = "windows")]
+pub use windows::IdleDetector;

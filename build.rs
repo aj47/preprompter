@@ -17,4 +17,12 @@ fn main() {
     {
         // x11rb RustConnection communicates via socket, no C library linking needed
     }
+
+    // Windows: Link against GDI32 and User32 for screen capture
+    #[cfg(target_os = "windows")]
+    {
+        println!("cargo:rustc-link-lib=gdi32");
+        println!("cargo:rustc-link-lib=user32");
+        println!("cargo:rustc-link-lib=dxgi");
+    }
 }

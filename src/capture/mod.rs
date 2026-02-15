@@ -4,6 +4,8 @@
 mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use chrono::{DateTime, Utc};
 
@@ -54,3 +56,5 @@ impl CapturedFrame {
 pub use macos::ScreenCapture;
 #[cfg(target_os = "linux")]
 pub use linux::ScreenCapture;
+#[cfg(target_os = "windows")]
+pub use windows::ScreenCapture;
