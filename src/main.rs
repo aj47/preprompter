@@ -2,6 +2,7 @@
 //!
 //! A lightweight screen capture daemon for macOS that captures screenshots,
 //! detects user inactivity, and uploads to S3-compatible storage.
+//! Includes a menu bar icon for status and control.
 
 mod capture;
 mod config;
@@ -13,7 +14,8 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::signal;
+use system_status_bar_macos::{Menu, MenuItem, StatusItem};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::capture::ScreenCapture;
@@ -25,8 +27,14 @@ use crate::storage::S3Uploader;
 /// Application version.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Commands from menu bar to capture loop
+#[derive(Debug, Clone)]
+enum MenuCommand {
+    ToggleCapture,
+    Quit,
+}
+
+fn main() -> Result<()> {
     // Parse command line arguments
     let config_path = std::env::args()
         .nth(1)
@@ -40,6 +48,79 @@ async fn main() -> Result<()> {
     init_tracing(&config.logging.level)?;
 
     info!("Starting preprompter v{}", VERSION);
+
+    // Channel for menu commands
+    let (cmd_tx, cmd_rx) = mpsc::channel::<MenuCommand>(10);
+
+    // Shared state for capture status
+    let capture_enabled = Arc::new(AtomicBool::new(true));
+    let capture_enabled_clone = capture_enabled.clone();
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+
+    // Spawn tokio runtime in a separate thread
+    let config_clone = config.clone();
+    let capture_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        runtime.block_on(async move {
+            if let Err(e) = run_capture_loop(config_clone, cmd_rx, capture_enabled_clone, running_clone).await {
+                error!("Capture loop error: {}", e);
+            }
+        });
+    });
+
+    // Create menu bar icon on main thread (required for macOS)
+    let cmd_tx_toggle = cmd_tx.clone();
+    let cmd_tx_quit = cmd_tx.clone();
+    let capture_enabled_menu = capture_enabled.clone();
+
+    let toggle_item = MenuItem::new(
+        "Pause Capture",
+        Some(Box::new(move || {
+            let is_enabled = capture_enabled_menu.load(Ordering::SeqCst);
+            capture_enabled_menu.store(!is_enabled, Ordering::SeqCst);
+            let _ = cmd_tx_toggle.blocking_send(MenuCommand::ToggleCapture);
+        })),
+        None,
+    );
+
+    let quit_item = MenuItem::new(
+        "Quit Preprompter",
+        Some(Box::new(move || {
+            let _ = cmd_tx_quit.blocking_send(MenuCommand::Quit);
+        })),
+        None,
+    );
+
+    let menu = Menu::new(vec![toggle_item, quit_item]);
+    let _status_item = StatusItem::new("📷", menu);
+
+    info!("Menu bar initialized - click 📷 to toggle/quit");
+
+    // Run macOS event loop on main thread (required for menu bar)
+    // The sync_infinite_event_loop needs a receiver for event loop messages
+    // But since our menu items handle events via callbacks, we just need a dummy channel
+    let (_event_sender, event_receiver) = std::sync::mpsc::channel::<()>();
+
+    // This blocks until the app quits - runs the macOS event loop
+    system_status_bar_macos::sync_infinite_event_loop(event_receiver, |_| {
+        // No-op callback - menu items handle their own events
+    });
+
+    // This is reached when event loop terminates
+    let _ = capture_thread.join();
+
+    info!("Preprompter shutdown complete");
+    Ok(())
+}
+
+/// Run the capture loop (runs in tokio runtime)
+async fn run_capture_loop(
+    config: Config,
+    mut cmd_rx: mpsc::Receiver<MenuCommand>,
+    capture_enabled: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+) -> Result<()> {
     info!("Configuration loaded: capture interval={}s, idle threshold={}s",
         config.capture.interval_seconds,
         config.idle.threshold_seconds
@@ -81,16 +162,6 @@ async fn main() -> Result<()> {
     // Log session start
     jsonl_logger.log_session_start(VERSION)?;
 
-    // Setup shutdown signal handling
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-
-    tokio::spawn(async move {
-        let _ = signal::ctrl_c().await;
-        info!("Received shutdown signal");
-        running_clone.store(false, Ordering::SeqCst);
-    });
-
     // Start idle detection
     let mut activity_rx = idle_detector.subscribe();
     idle_detector.start()?;
@@ -105,8 +176,8 @@ async fn main() -> Result<()> {
     while running.load(Ordering::SeqCst) {
         tokio::select! {
             _ = interval.tick() => {
-                // Skip capture if idle
-                if is_idle {
+                // Skip capture if paused or idle
+                if !capture_enabled.load(Ordering::SeqCst) || is_idle {
                     continue;
                 }
 
@@ -156,6 +227,19 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            Some(cmd) = cmd_rx.recv() => {
+                match cmd {
+                    MenuCommand::ToggleCapture => {
+                        let enabled = capture_enabled.load(Ordering::SeqCst);
+                        info!("Capture {}", if enabled { "resumed" } else { "paused" });
+                    }
+                    MenuCommand::Quit => {
+                        info!("Quit command received");
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
             Ok(state) = activity_rx.recv() => {
                 match state {
                     ActivityState::Active => {
@@ -183,7 +267,9 @@ async fn main() -> Result<()> {
     idle_detector.stop();
 
     info!("Captured {} frames total. Goodbye!", frames_captured);
-    Ok(())
+
+    // Exit the process to close the menu bar
+    std::process::exit(0);
 }
 
 /// Initialize tracing subscriber with the given log level.
