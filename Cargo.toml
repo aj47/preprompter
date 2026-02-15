@@ -3,11 +3,10 @@ name = "preprompter"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "macOS screen capture daemon with idle detection and S3 upload"
+description = "Cross-platform screen capture daemon with idle detection and S3 upload"
 
 [dependencies]
 tokio = { version = "1.44", features = ["full", "tracing"] }
-screencapturekit = { version = "1.5", features = ["async"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 aws-sdk-s3 = "1.65"
 aws-config = { version = "1.5.10", features = ["behavior-version-latest"] }
@@ -19,9 +18,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
 thiserror = "2.0"
+dirs = "6.0"
+
+# macOS-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "1.5", features = ["async"] }
 core-foundation = "0.10"
 core-graphics = "0.24"
-dirs = "6.0"
+
+# Linux-specific dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["screensaver", "randr"] }
 
 [dev-dependencies]
 tempfile = "3.15"
@@ -32,4 +39,3 @@ lto = true
 codegen-units = 1
 opt-level = "s"
 strip = true
-

@@ -1,4 +1,4 @@
-//! Idle detection using IOKit HIDIdleTime for system-wide idle monitoring.
+//! Idle detection using IOKit HIDIdleTime for system-wide idle monitoring (macOS).
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -12,14 +12,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{debug, info};
 
-/// User activity state.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ActivityState {
-    /// User is currently active.
-    Active,
-    /// User has been idle since the given time.
-    Idle { since: DateTime<Utc> },
-}
+use super::ActivityState;
 
 /// Shared state for idle detection.
 struct IdleState {
@@ -54,7 +47,7 @@ impl IdleState {
     }
 }
 
-/// Idle detector using CGEventTap for system-wide event monitoring.
+/// Idle detector using IOKit HIDIdleTime.
 pub struct IdleDetector {
     /// Idle threshold duration.
     threshold: Duration,
@@ -102,12 +95,11 @@ impl IdleDetector {
     /// Start the idle detector.
     pub fn start(&self) -> Result<()> {
         if self.state.running.swap(true, Ordering::SeqCst) {
-            return Ok(()); // Already running
+            return Ok(());
         }
 
         info!("Starting idle detector with threshold {:?}", self.threshold);
 
-        // Start idle monitor thread (polls IOKit HIDIdleTime)
         let state_clone = self.state.clone();
         let _monitor_handle = thread::Builder::new()
             .name("idle-monitor".to_string())
@@ -115,7 +107,6 @@ impl IdleDetector {
                 run_idle_monitor(state_clone);
             })?;
 
-        // Start checker thread (broadcasts state changes)
         let state_clone = self.state.clone();
         let threshold = self.threshold;
         let state_tx = self.state_tx.clone();
@@ -136,10 +127,7 @@ impl IdleDetector {
 }
 
 /// Get the system idle time using IOKit HIDIdleTime.
-/// Returns the number of seconds since the last user input.
 fn get_system_idle_time() -> Option<Duration> {
-    // Use IOKit to get HIDIdleTime
-    // This requires linking against IOKit framework
     #[link(name = "IOKit", kind = "framework")]
     extern "C" {
         fn IOServiceGetMatchingService(
@@ -182,7 +170,6 @@ fn get_system_idle_time() -> Option<Duration> {
             return None;
         }
 
-        // The property is a CFNumber containing nanoseconds
         let cf_number: CFNumber = CFNumber::wrap_under_create_rule(property as *mut _);
         let nanoseconds: i64 = cf_number.to_i64()?;
 
@@ -199,9 +186,7 @@ fn run_idle_monitor(state: Arc<IdleState>) {
     while state.running.load(Ordering::SeqCst) {
         thread::sleep(poll_interval);
 
-        // Update the last activity time based on system idle time
         if let Some(idle_time) = get_system_idle_time() {
-            // If idle time is very small, user just did something
             if idle_time < poll_interval {
                 state.update_activity();
             }
@@ -227,7 +212,6 @@ fn run_idle_checker(
         let is_now_idle = idle_duration >= threshold;
 
         if is_now_idle != was_idle {
-            // State changed
             state.is_idle.store(is_now_idle, Ordering::SeqCst);
 
             let new_state = if is_now_idle {
@@ -239,7 +223,6 @@ fn run_idle_checker(
                 ActivityState::Active
             };
 
-            // Broadcast state change
             let _ = state_tx.send(new_state);
             was_idle = is_now_idle;
         }
@@ -253,4 +236,3 @@ impl Drop for IdleDetector {
         self.stop();
     }
 }
-

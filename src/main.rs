@@ -1,7 +1,8 @@
-//! Preprompter - macOS Screen Capture Daemon
+//! Preprompter - Cross-Platform Screen Capture Daemon
 //!
-//! A lightweight screen capture daemon for macOS that captures screenshots,
+//! A lightweight screen capture daemon that captures screenshots,
 //! detects user inactivity, and uploads to S3-compatible storage.
+//! Supports macOS and Linux (X11).
 
 mod capture;
 mod config;
@@ -186,4 +187,3 @@ fn init_tracing(level: &str) -> Result<()> {
 
     Ok(())
 }
-
