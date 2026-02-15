@@ -6,9 +6,9 @@ monitor_id = -1
 # Capture interval in seconds
 interval_seconds = 5
 # JPEG quality (1-100)
-jpeg_quality = 70
+jpeg_quality = 80
 # Resolution scale (0.25 = 25%, 0.5 = 50%, 1.0 = full)
-resolution_scale = 0.25
+resolution_scale = 0.5
 
 [idle]
 # Idle threshold in seconds - capture pauses when user is idle for this long
