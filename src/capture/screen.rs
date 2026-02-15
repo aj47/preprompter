@@ -39,17 +39,21 @@ pub struct CapturedFrame {
 
 /// Screen capture manager using ScreenCaptureKit.
 pub struct ScreenCapture {
-    monitor_id: u32,
+    monitor_id: i32,
     jpeg_quality: u8,
+    resolution_scale: f32,
 }
 
 impl ScreenCapture {
     /// Create a new screen capture instance.
-    pub fn new(monitor_id: u32, jpeg_quality: u8) -> Result<Self> {
+    /// monitor_id: -1 = all monitors, 0+ = specific monitor
+    pub fn new(monitor_id: i32, jpeg_quality: u8, resolution_scale: f32) -> Result<Self> {
         let quality = jpeg_quality.clamp(1, 100);
+        let scale = resolution_scale.clamp(0.1, 1.0);
         Ok(Self {
             monitor_id,
             jpeg_quality: quality,
+            resolution_scale: scale,
         })
     }
 
@@ -74,15 +78,17 @@ impl ScreenCapture {
     }
 
     /// Capture a single frame from the configured monitor.
+    /// If monitor_id is -1, captures all monitors and returns a Vec.
     pub async fn capture(&self) -> Result<CapturedFrame> {
         let start = Instant::now();
         let timestamp = Utc::now();
         let quality = self.jpeg_quality;
         let monitor_id = self.monitor_id;
+        let resolution_scale = self.resolution_scale;
 
         // Run the blocking capture in a separate thread
         let result = tokio::task::spawn_blocking(move || {
-            capture_frame_blocking(monitor_id, quality)
+            capture_frame_blocking(monitor_id, quality, resolution_scale)
         })
         .await
         .context("Capture task panicked")?
@@ -98,6 +104,41 @@ impl ScreenCapture {
             monitor_id: result.3,
             capture_duration_ms,
         })
+    }
+
+    /// Capture all monitors and return a Vec of frames.
+    pub async fn capture_all(&self) -> Result<Vec<CapturedFrame>> {
+        let start = Instant::now();
+        let timestamp = Utc::now();
+        let quality = self.jpeg_quality;
+        let resolution_scale = self.resolution_scale;
+
+        // Run the blocking capture in a separate thread
+        let results = tokio::task::spawn_blocking(move || {
+            capture_all_monitors_blocking(quality, resolution_scale)
+        })
+        .await
+        .context("Capture task panicked")?
+        .context("Capture failed")?;
+
+        let capture_duration_ms = start.elapsed().as_millis() as u64;
+
+        Ok(results
+            .into_iter()
+            .map(|(data, width, height, monitor_id)| CapturedFrame {
+                data,
+                width,
+                height,
+                timestamp,
+                monitor_id,
+                capture_duration_ms,
+            })
+            .collect())
+    }
+
+    /// Returns true if configured to capture all monitors.
+    pub fn captures_all_monitors(&self) -> bool {
+        self.monitor_id < 0
     }
 }
 
@@ -130,8 +171,8 @@ impl SCStreamOutputTrait for FrameHandler {
     }
 }
 
-/// Blocking capture implementation
-fn capture_frame_blocking(monitor_id: u32, quality: u8) -> Result<(Vec<u8>, u32, u32, u32)> {
+/// Blocking capture implementation for a single monitor
+fn capture_frame_blocking(monitor_id: i32, quality: u8, resolution_scale: f32) -> Result<(Vec<u8>, u32, u32, u32)> {
     // Get shareable content
     let content = SCShareableContent::get()
         .map_err(|e| anyhow::anyhow!("Failed to get shareable content: {:?}", e))?;
@@ -141,16 +182,59 @@ fn capture_frame_blocking(monitor_id: u32, quality: u8) -> Result<(Vec<u8>, u32,
         anyhow::bail!("No displays available for capture");
     }
 
-    // Find the requested monitor
-    let display = displays
-        .iter()
-        .find(|d| d.display_id() == monitor_id)
-        .or_else(|| displays.first())
-        .ok_or_else(|| anyhow::anyhow!("Monitor {} not found", monitor_id))?;
+    // Find the requested monitor (use first if monitor_id < 0 or not found)
+    let display = if monitor_id >= 0 {
+        displays
+            .iter()
+            .find(|d| d.display_id() == monitor_id as u32)
+            .or_else(|| displays.first())
+    } else {
+        displays.first()
+    }
+    .ok_or_else(|| anyhow::anyhow!("No monitor found"))?;
 
+    capture_single_display(display, quality, resolution_scale)
+}
+
+/// Blocking capture implementation for all monitors
+fn capture_all_monitors_blocking(quality: u8, resolution_scale: f32) -> Result<Vec<(Vec<u8>, u32, u32, u32)>> {
+    let content = SCShareableContent::get()
+        .map_err(|e| anyhow::anyhow!("Failed to get shareable content: {:?}", e))?;
+
+    let displays = content.displays();
+    if displays.is_empty() {
+        anyhow::bail!("No displays available for capture");
+    }
+
+    let mut results = Vec::with_capacity(displays.len());
+    for display in displays.iter() {
+        let display_id = display.display_id();
+        match capture_single_display(display, quality, resolution_scale) {
+            Ok(result) => results.push(result),
+            Err(e) => tracing::warn!("Failed to capture display {}: {}", display_id, e),
+        }
+    }
+
+    if results.is_empty() {
+        anyhow::bail!("Failed to capture any display");
+    }
+
+    Ok(results)
+}
+
+/// Capture a single display
+fn capture_single_display(
+    display: &SCDisplay,
+    quality: u8,
+    resolution_scale: f32,
+) -> Result<(Vec<u8>, u32, u32, u32)> {
     let display_id = display.display_id();
-    let width = display.width() as u32;
-    let height = display.height() as u32;
+    let native_width = display.width() as u32;
+    let native_height = display.height() as u32;
+
+    // Apply resolution scaling
+    let scaled_width = ((native_width as f32) * resolution_scale).round() as u32;
+    let scaled_height = ((native_height as f32) * resolution_scale).round() as u32;
 
     // Create content filter and configuration
     let filter = SCContentFilter::create()
@@ -159,8 +243,8 @@ fn capture_frame_blocking(monitor_id: u32, quality: u8) -> Result<(Vec<u8>, u32,
         .build();
 
     let config = SCStreamConfiguration::new()
-        .with_width(width)
-        .with_height(height)
+        .with_width(scaled_width)
+        .with_height(scaled_height)
         .with_pixel_format(PixelFormat::BGRA);
 
     // Create shared state for frame capture
@@ -202,7 +286,7 @@ fn capture_frame_blocking(monitor_id: u32, quality: u8) -> Result<(Vec<u8>, u32,
         .take()
         .ok_or_else(|| anyhow::anyhow!("No frame captured - check Screen Recording permission"))?;
 
-    Ok((data, width, height, display_id))
+    Ok((data, scaled_width, scaled_height, display_id))
 }
 
 /// Encode a pixel buffer to JPEG format.

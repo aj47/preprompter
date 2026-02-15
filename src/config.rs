@@ -23,15 +23,18 @@ pub struct Config {
 /// Screen capture configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureConfig {
-    /// Monitor ID to capture (0 = primary monitor).
+    /// Monitor ID to capture (0 = primary monitor, -1 = all monitors).
     #[serde(default)]
-    pub monitor_id: u32,
+    pub monitor_id: i32,
     /// Capture interval in seconds.
     #[serde(default = "default_interval_seconds")]
     pub interval_seconds: u64,
     /// JPEG quality (1-100).
     #[serde(default = "default_jpeg_quality")]
     pub jpeg_quality: u8,
+    /// Resolution scale (0.25 = 25%, 0.5 = 50%, 1.0 = full).
+    #[serde(default = "default_resolution_scale")]
+    pub resolution_scale: f32,
 }
 
 impl Default for CaptureConfig {
@@ -40,6 +43,7 @@ impl Default for CaptureConfig {
             monitor_id: 0,
             interval_seconds: default_interval_seconds(),
             jpeg_quality: default_jpeg_quality(),
+            resolution_scale: default_resolution_scale(),
         }
     }
 }
@@ -179,6 +183,10 @@ fn default_interval_seconds() -> u64 {
 
 fn default_jpeg_quality() -> u8 {
     80
+}
+
+fn default_resolution_scale() -> f32 {
+    1.0
 }
 
 fn default_idle_threshold() -> u64 {

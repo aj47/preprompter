@@ -1,12 +1,14 @@
 # Preprompter - macOS Screen Capture Daemon Configuration
 
 [capture]
-# Monitor ID to capture (0 = primary monitor)
-monitor_id = 0
+# Monitor ID to capture (0 = primary monitor, -1 = all monitors)
+monitor_id = -1
 # Capture interval in seconds
-interval_seconds = 3
+interval_seconds = 5
 # JPEG quality (1-100)
-jpeg_quality = 80
+jpeg_quality = 70
+# Resolution scale (0.25 = 25%, 0.5 = 50%, 1.0 = full)
+resolution_scale = 0.25
 
 [idle]
 # Idle threshold in seconds - capture pauses when user is idle for this long

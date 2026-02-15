@@ -65,7 +65,14 @@ async fn main() -> Result<()> {
     let screen_capture = ScreenCapture::new(
         config.capture.monitor_id,
         config.capture.jpeg_quality,
+        config.capture.resolution_scale,
     )?;
+
+    info!(
+        "Capture settings: monitor_id={}, resolution_scale={:.0}%",
+        if config.capture.monitor_id < 0 { "all".to_string() } else { config.capture.monitor_id.to_string() },
+        config.capture.resolution_scale * 100.0
+    );
 
     let idle_detector = IdleDetector::new(config.idle.threshold())?;
     let s3_uploader = S3Uploader::new(&config.s3).await?;
@@ -103,36 +110,44 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // Capture frame
-                match screen_capture.capture().await {
-                    Ok(frame) => {
-                        let frame_id = frame.frame_id();
-                        let file_size = frame.data.len();
-                        let capture_ms = frame.capture_duration_ms;
+                // Capture frame(s) - multi-monitor or single
+                let frames_result = if screen_capture.captures_all_monitors() {
+                    screen_capture.capture_all().await
+                } else {
+                    screen_capture.capture().await.map(|f| vec![f])
+                };
 
-                        // Upload to S3
-                        match s3_uploader.upload_frame(&frame).await {
-                            Ok(result) => {
-                                frames_captured += 1;
+                match frames_result {
+                    Ok(frames) => {
+                        for frame in frames {
+                            let frame_id = frame.frame_id();
+                            let file_size = frame.data.len();
+                            let capture_ms = frame.capture_duration_ms;
 
-                                // Log frame metadata
-                                if let Err(e) = jsonl_logger.log_frame(
-                                    &frame,
-                                    &result.key,
-                                    &config.s3.bucket,
-                                    result.upload_duration_ms,
-                                    0, // idle_seconds_before
-                                ) {
-                                    warn!("Failed to log frame: {}", e);
+                            // Upload to S3
+                            match s3_uploader.upload_frame(&frame).await {
+                                Ok(result) => {
+                                    frames_captured += 1;
+
+                                    // Log frame metadata
+                                    if let Err(e) = jsonl_logger.log_frame(
+                                        &frame,
+                                        &result.key,
+                                        &config.s3.bucket,
+                                        result.upload_duration_ms,
+                                        0, // idle_seconds_before
+                                    ) {
+                                        warn!("Failed to log frame: {}", e);
+                                    }
+
+                                    info!(
+                                        "Captured frame {} (mon:{}) -> {} ({} bytes, capture={}ms, upload={}ms)",
+                                        frame_id, frame.monitor_id, result.key, file_size, capture_ms, result.upload_duration_ms
+                                    );
                                 }
-
-                                info!(
-                                    "Captured frame {} -> {} ({} bytes, capture={}ms, upload={}ms)",
-                                    frame_id, result.key, file_size, capture_ms, result.upload_duration_ms
-                                );
-                            }
-                            Err(e) => {
-                                error!("Failed to upload frame {}: {}", frame_id, e);
+                                Err(e) => {
+                                    error!("Failed to upload frame {}: {}", frame_id, e);
+                                }
                             }
                         }
                     }
